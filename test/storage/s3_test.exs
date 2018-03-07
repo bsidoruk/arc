@@ -33,7 +33,7 @@ defmodule ArcTest.Storage.S3 do
 
   defmodule DefinitionWithBucket do
     use Arc.Definition
-    def bucket, do: :custom_bucket_name
+    def bucket(_), do: :custom_bucket_name
   end
 
   defmodule DefinitionWithS3Overrides do
@@ -239,9 +239,20 @@ defmodule ArcTest.Storage.S3 do
       assert {:ok, "image.png"} = DefinitionWithS3Overrides.store("test/support/image.png")
     end
 
+    @tag :s3
+    @tag timeout: 15000
     test "delete file" do
       {:ok, path} = DefinitionWithS3Overrides.store("test/support/image.png")
       assert DefinitionWithS3Overrides.delete(path) == :ok
+      delete_and_assert_not_found(DefinitionWithS3Overrides, path)
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "generate signed url" do
+      {:ok, path} = DefinitionWithS3Overrides.store("test/support/image.png")
+      assert_private(DefinitionWithS3Overrides, path)
+      delete_and_assert_not_found(DefinitionWithS3Overrides, path)
     end
   end
 
