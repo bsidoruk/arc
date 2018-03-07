@@ -36,6 +36,11 @@ defmodule ArcTest.Storage.S3 do
     def bucket, do: :custom_bucket_name
   end
 
+  defmodule DefinitionWithS3Overrides do
+    use Arc.Definition
+    def config_overrides(_), do: [access_key_id: System.get_env("ARC_TEST_S3_KEY"), secret_access_key: System.get_env("ARC_TEST_S3_SECRET")]
+  end
+
   def env_bucket do
     System.get_env("ARC_TEST_BUCKET")
   end
@@ -103,125 +108,145 @@ defmodule ArcTest.Storage.S3 do
     Application.put_env :arc, :virtual_host, false
     Application.put_env :arc, :bucket, { :system, "ARC_TEST_BUCKET" }
     # Application.put_env :ex_aws, :s3, [scheme: "https://", host: "s3.amazonaws.com", region: "us-west-2"]
-    Application.put_env :ex_aws, :access_key_id, System.get_env("ARC_TEST_S3_KEY")
-    Application.put_env :ex_aws, :secret_access_key,  System.get_env("ARC_TEST_S3_SECRET")
     # Application.put_env :ex_aws, :region, "us-east-1"
     # Application.put_env :ex_aws, :scheme, "https://"
   end
 
-  def with_env(app, key, value, fun) do
-    previous = Application.get_env(app, key, :nothing)
+  describe "with standard config," do
+    setup :set_credentials_from_env
 
-    Application.put_env(app, key, value)
-    fun.()
+    def with_env(app, key, value, fun) do
+      previous = Application.get_env(app, key, :nothing)
 
-    case previous do
-      :nothing -> Application.delete_env(app, key)
-      _ -> Application.put_env(app, key, previous)
+      Application.put_env(app, key, value)
+      fun.()
+
+      case previous do
+        :nothing -> Application.delete_env(app, key)
+        _ -> Application.put_env(app, key, previous)
+      end
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "virtual_host" do
+      with_env :arc, :virtual_host, true, fn ->
+        assert "https://#{env_bucket()}.s3.amazonaws.com/arctest/uploads/image.png" == DummyDefinition.url(@img)
+      end
+
+      with_env :arc, :virtual_host, false, fn ->
+        assert "https://s3.amazonaws.com/#{env_bucket()}/arctest/uploads/image.png" == DummyDefinition.url(@img)
+      end
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "custom asset_host" do
+      custom_asset_host = "https://some.cloudfront.com"
+
+      with_env :arc, :asset_host, custom_asset_host, fn ->
+        assert "#{custom_asset_host}/arctest/uploads/image.png" == DummyDefinition.url(@img)
+      end
+
+      with_env :arc, :asset_host, {:system, "ARC_ASSET_HOST"}, fn ->
+        System.put_env("ARC_ASSET_HOST", custom_asset_host)
+        assert "#{custom_asset_host}/arctest/uploads/image.png" == DummyDefinition.url(@img)
+      end
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "encoded url" do
+      url = DummyDefinition.url(@img_with_space)
+      assert "https://s3.amazonaws.com/#{env_bucket()}/arctest/uploads/image%20two.png" == url
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "public put and get" do
+      assert {:ok, "image.png"} == DummyDefinition.store(@img)
+      assert_public(DummyDefinition, "image.png")
+      delete_and_assert_not_found(DummyDefinition, "image.png")
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "private put and signed get" do
+      #put the image as private
+      assert {:ok, "image.png"} == DummyDefinition.store({@img, :private})
+      assert_private(DummyDefinition, "image.png")
+      delete_and_assert_not_found(DummyDefinition, "image.png")
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "content_type" do
+      {:ok, "image.png"} = DummyDefinition.store({@img, :with_content_type})
+      assert_header(DummyDefinition, "image.png", "content-type", "image/gif")
+      delete_and_assert_not_found(DummyDefinition, "image.png")
+    end
+
+    @tag :s3
+    @tag timeout: 15000
+    test "content_disposition" do
+      {:ok, "image.png"} = DummyDefinition.store({@img, :with_content_disposition})
+      assert_header(DummyDefinition, "image.png", "content-disposition", "attachment; filename=abc.png")
+      delete_and_assert_not_found(DummyDefinition, "image.png")
+    end
+
+    @tag :s3
+    @tag timeout: 150000
+    test "delete with scope" do
+      scope = %{id: 1}
+      {:ok, path} = DefinitionWithScope.store({"test/support/image.png", scope})
+      assert "https://s3.amazonaws.com/#{env_bucket()}/uploads/with_scopes/1/image.png" == DefinitionWithScope.url({path, scope})
+      assert_public(DefinitionWithScope, {path, scope})
+      delete_and_assert_not_found(DefinitionWithScope, {path, scope})
+    end
+
+    @tag :s3
+    @tag timeout: 150000
+    test "with bucket" do
+      url = "https://s3.amazonaws.com/custom_bucket_name/uploads/image.png"
+      assert url == DefinitionWithBucket.url("test/support/image.png")
+      {:ok, path} = DefinitionWithBucket.store("test/support/image.png")
+      assert url == path
+      delete_and_assert_not_found(DefinitionWithBucket, "test/support/image.png")
+    end
+
+    @tag :s3
+    @tag timeout: 150000
+    test "put with error" do
+      Application.put_env(:arc, :bucket, "unknown-bucket")
+      {:error, res} = DummyDefinition.store("test/support/image.png")
+      Application.put_env :arc, :bucket, env_bucket()
+      assert res
+    end
+
+    @tag :s3
+    @tag timeout: 150000
+    test "put with converted version" do
+      assert {:ok, "image.png"} == DefinitionWithThumbnail.store(@img)
+      assert_public_with_extension(DefinitionWithThumbnail, "image.png", :thumb, ".jpg")
+      delete_and_assert_not_found(DefinitionWithThumbnail, "image.png")
     end
   end
 
-  @tag :s3
-  @tag timeout: 15000
-  test "virtual_host" do
-    with_env :arc, :virtual_host, true, fn ->
-      assert "https://#{env_bucket()}.s3.amazonaws.com/arctest/uploads/image.png" == DummyDefinition.url(@img)
+  describe "with config overrides," do
+    @tag :s3
+    @tag timeout: 15000
+    test "upload file" do
+      assert {:ok, "image.png"} = DefinitionWithS3Overrides.store("test/support/image.png")
     end
 
-    with_env :arc, :virtual_host, false, fn ->
-      assert "https://s3.amazonaws.com/#{env_bucket()}/arctest/uploads/image.png" == DummyDefinition.url(@img)
-    end
-  end
-
-  @tag :s3
-  @tag timeout: 15000
-  test "custom asset_host" do
-    custom_asset_host = "https://some.cloudfront.com"
-
-    with_env :arc, :asset_host, custom_asset_host, fn ->
-      assert "#{custom_asset_host}/arctest/uploads/image.png" == DummyDefinition.url(@img)
-    end
-
-    with_env :arc, :asset_host, {:system, "ARC_ASSET_HOST"}, fn ->
-      System.put_env("ARC_ASSET_HOST", custom_asset_host)
-      assert "#{custom_asset_host}/arctest/uploads/image.png" == DummyDefinition.url(@img)
+    test "delete file" do
+      {:ok, path} = DefinitionWithS3Overrides.store("test/support/image.png")
+      assert DefinitionWithS3Overrides.delete(path) == :ok
     end
   end
 
-  @tag :s3
-  @tag timeout: 15000
-  test "encoded url" do
-    url = DummyDefinition.url(@img_with_space)
-    assert "https://s3.amazonaws.com/#{env_bucket()}/arctest/uploads/image%20two.png" == url
-  end
-
-  @tag :s3
-  @tag timeout: 15000
-  test "public put and get" do
-    assert {:ok, "image.png"} == DummyDefinition.store(@img)
-    assert_public(DummyDefinition, "image.png")
-    delete_and_assert_not_found(DummyDefinition, "image.png")
-  end
-
-  @tag :s3
-  @tag timeout: 15000
-  test "private put and signed get" do
-    #put the image as private
-    assert {:ok, "image.png"} == DummyDefinition.store({@img, :private})
-    assert_private(DummyDefinition, "image.png")
-    delete_and_assert_not_found(DummyDefinition, "image.png")
-  end
-
-  @tag :s3
-  @tag timeout: 15000
-  test "content_type" do
-    {:ok, "image.png"} = DummyDefinition.store({@img, :with_content_type})
-    assert_header(DummyDefinition, "image.png", "content-type", "image/gif")
-    delete_and_assert_not_found(DummyDefinition, "image.png")
-  end
-
-  @tag :s3
-  @tag timeout: 15000
-  test "content_disposition" do
-    {:ok, "image.png"} = DummyDefinition.store({@img, :with_content_disposition})
-    assert_header(DummyDefinition, "image.png", "content-disposition", "attachment; filename=abc.png")
-    delete_and_assert_not_found(DummyDefinition, "image.png")
-  end
-
-  @tag :s3
-  @tag timeout: 150000
-  test "delete with scope" do
-    scope = %{id: 1}
-    {:ok, path} = DefinitionWithScope.store({"test/support/image.png", scope})
-    assert "https://s3.amazonaws.com/#{env_bucket()}/uploads/with_scopes/1/image.png" == DefinitionWithScope.url({path, scope})
-    assert_public(DefinitionWithScope, {path, scope})
-    delete_and_assert_not_found(DefinitionWithScope, {path, scope})
-  end
-
-  @tag :s3
-  @tag timeout: 150000
-  test "with bucket" do
-    url = "https://s3.amazonaws.com/custom_bucket_name/uploads/image.png"
-    assert url == DefinitionWithBucket.url("test/support/image.png")
-    {:ok, path} = DefinitionWithBucket.store("test/support/image.png")
-    assert url == path
-    delete_and_assert_not_found(DefinitionWithBucket, "test/support/image.png")
-  end
-
-  @tag :s3
-  @tag timeout: 150000
-  test "put with error" do
-    Application.put_env(:arc, :bucket, "unknown-bucket")
-    {:error, res} = DummyDefinition.store("test/support/image.png")
-    Application.put_env :arc, :bucket, env_bucket()
-    assert res
-  end
-
-  @tag :s3
-  @tag timeout: 150000
-  test "put with converted version" do
-    assert {:ok, "image.png"} == DefinitionWithThumbnail.store(@img)
-    assert_public_with_extension(DefinitionWithThumbnail, "image.png", :thumb, ".jpg")
-    delete_and_assert_not_found(DefinitionWithThumbnail, "image.png")
+  defp set_credentials_from_env(_) do
+    Application.put_env :ex_aws, :access_key_id, System.get_env("ARC_TEST_S3_KEY")
+    Application.put_env :ex_aws, :secret_access_key,  System.get_env("ARC_TEST_S3_SECRET")
   end
 end
